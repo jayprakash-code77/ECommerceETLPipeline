@@ -1,0 +1,12 @@
+version: "3"
+
+services:
+  finalproject:
+    image: finalproject:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow_dags:/opt/airflow/dags
+      - ./airflow_logs:/opt/airflow/logs
+      - ./airflow_config:/opt/airflow/config
+    command: airflow standalone
