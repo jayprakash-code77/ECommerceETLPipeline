@@ -1,12 +1,42 @@
-version: "3"
+version: '3.8'
 
 services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: ecommerce_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
   finalproject:
     image: finalproject:latest
+    container_name: finalproject
+    depends_on:
+      - postgres
     ports:
       - "8080:8080"
     volumes:
       - ./airflow_dags:/opt/airflow/dags
       - ./airflow_logs:/opt/airflow/logs
       - ./airflow_config:/opt/airflow/config
+      - ./data:/opt/airflow/data
     command: airflow standalone
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin_ui
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+volumes:
+  pg_data:
