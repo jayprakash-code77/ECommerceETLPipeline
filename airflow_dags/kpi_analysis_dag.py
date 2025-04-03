@@ -2,115 +2,142 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
 import pandas as pd
-import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
 import logging
-from io import StringIO
+import matplotlib.pyplot as plt
+import os
 
-# Logging setup
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 
-# Database Connection
+# Database connection
 DB_URI = "postgresql://airflow:airflow@postgres:5432/ecommerce_db"
-KPI_TABLE = "business_kpis"
+
+# Define output path for visualizations
+OUTPUT_FOLDER = "/opt/airflow/data"
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 def compute_kpis():
-    """Computes business KPIs and stores them in the database."""
+    """
+    Computes business KPIs from the PostgreSQL database.
+    - Calculates Average Order Value (AOV)
+    - Stores KPI results in the business_kpis table
+    """
     engine = create_engine(DB_URI)
+    logging.info("Connected to PostgreSQL for KPI computation.")
 
-    logging.info("Loading data from PostgreSQL...")
-    df_orders = pd.read_sql("SELECT order_id, customer_id, order_status, order_purchase_timestamp FROM orders", engine)
-    df_order_items = pd.read_sql("SELECT order_id, price FROM order_items", engine)
-    df_customers = pd.read_sql("SELECT customer_id, customer_state FROM customers", engine)
+    # Fetch order data from the database
+    query = "SELECT * FROM order_items"
+    df = pd.read_sql(query, engine)
 
-    df_orders = df_orders.merge(df_customers, on="customer_id", how="left")
+    # Log available columns
+    logging.info(f"Available columns in order_items table: {list(df.columns)}")
 
-    # ✅ Convert order_purchase_timestamp to datetime
-    df_orders["order_purchase_timestamp"] = pd.to_datetime(df_orders["order_purchase_timestamp"], errors='coerce')
-
-    # ✅ Extract month for AOV calculation
-    df_orders["month"] = df_orders["order_purchase_timestamp"].dt.to_period("M").astype(str)
-
-    logging.info(f"First few rows after adding 'month' column:\n{df_orders[['order_purchase_timestamp', 'month']].head()}")
-
-    # 🔹 Merge order items with orders
-    df_revenue = df_orders.merge(df_order_items, on="order_id", how="left")
-
-    if "price" not in df_revenue.columns:
-        logging.error("❌ 'price' column missing after merging. Check order_items table.")
-        return  
-
-    # ✅ **Average Order Value (AOV) Calculation**
-    if "month" in df_orders.columns and "price" in df_revenue.columns:
-        avg_order_value = df_revenue.groupby("month")["price"].sum() / df_orders.groupby("month")["order_id"].nunique()
-        avg_order_value = avg_order_value.fillna(0).reset_index()
-    else:
-        logging.error("❌ Missing 'month' column before AOV calculation.")
+    if df.empty:
+        logging.error("Order Items table is empty. Skipping KPI computation.")
         return
 
-    logging.info("✅ KPIs computed successfully.")
+    if 'price' not in df.columns:
+        logging.error("'price' column missing in order_items table. Aborting KPI computation.")
+        return
 
+    # Convert price column to numeric, handling errors
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
-def generate_visualizations():
-    """Generates and saves visualizations for business KPIs."""
+    # Compute Average Order Value (AOV)
+    avg_order_value = df.groupby("order_id")["price"].sum().mean()
+    logging.info(f"Average Order Value: {avg_order_value}")
+
+    # Store KPI in the database
+    kpi_df = pd.DataFrame({'metric': ['AOV'], 'value': [avg_order_value]})
+    kpi_df.to_sql("business_kpis", engine, if_exists="replace", index=False)
+    logging.info("KPI computation completed and stored in business_kpis table.")
+
+def generate_visuals():
+    """
+    Generates and saves visualizations for business KPIs:
+    - Histogram of order prices
+    - Box plot of order prices
+    - Bar chart of average order value per order
+    """
     engine = create_engine(DB_URI)
-    kpi_data = pd.read_sql(f"SELECT * FROM {KPI_TABLE}", engine)
-    
-    def safe_read_json(data):
-        return pd.read_json(StringIO(data)) if isinstance(data, str) else pd.DataFrame()
-    
-    # ✅ **Sales by State (Pie Chart)**
-    sales_data = safe_read_json(kpi_data[kpi_data["metric"] == "Total Sales by State"]["value"].values[0])
-    if not sales_data.empty:
-        plt.figure(figsize=(10, 6))
-        plt.pie(sales_data["total_orders"], labels=sales_data["state"], autopct="%1.1f%%", startangle=140)
-        plt.title("Total Sales by State")
-        plt.savefig("/opt/airflow/dags/sales_by_state.png")
+    logging.info("Connected to PostgreSQL for visualization.")
 
-    # ✅ **Product Return Rate (Bar Chart)**
-    return_rate = float(kpi_data[kpi_data["metric"] == "Product Return Rate"]["value"].values[0])
-    plt.figure(figsize=(6, 4))
-    plt.bar(["Return Rate"], [return_rate], color="red")
-    plt.ylabel("Return Rate (%)")
-    plt.title("Product Return Rate")
-    plt.savefig("/opt/airflow/dags/return_rate.png")
+    # Fetch order data from the database
+    query = "SELECT * FROM order_items"
+    df = pd.read_sql(query, engine)
 
-    # ✅ **Average Order Value Over Time (Line Chart)**
-    avg_order_value = safe_read_json(kpi_data[kpi_data["metric"] == "Average Order Value Over Time"]["value"].values[0])
-    if not avg_order_value.empty and "price" in avg_order_value.columns:
-        plt.figure(figsize=(10, 5))
-        plt.plot(avg_order_value["month"], avg_order_value["price"], marker="o", linestyle="-", color="blue")
-        plt.xlabel("Month")
-        plt.ylabel("AOV ($)")
-        plt.xticks(rotation=45)
-        plt.title("Average Order Value Over Time")
-        plt.grid()
-        plt.savefig("/opt/airflow/dags/avg_order_value.png")
-    else:
-        logging.error("❌ 'price' column missing in avg_order_value DataFrame. Skipping visualization.")
+    if df.empty:
+        logging.error("Order Items table is empty. Skipping visualization.")
+        return
 
-    logging.info("✅ Visualizations generated successfully.")
+    if 'price' not in df.columns:
+        logging.error("'price' column missing in DataFrame. Skipping visualization.")
+        return
+
+    # Histogram of Order Prices
+    plt.figure(figsize=(8, 5))
+    plt.hist(df['price'], bins=20, color='blue', alpha=0.7, edgecolor='black')
+    plt.xlabel("Price")
+    plt.ylabel("Frequency")
+    plt.title("Order Price Distribution")
+    plt.grid()
+    plt.savefig(os.path.join(OUTPUT_FOLDER, "order_price_distribution.png"))
+    plt.close()
+    logging.info("Histogram saved: data/order_price_distribution.png")
+
+    # Box Plot of Order Prices
+    plt.figure(figsize=(6, 5))
+    plt.boxplot(df['price'], vert=False, patch_artist=True, boxprops=dict(facecolor="skyblue"))
+    plt.xlabel("Price")
+    plt.title("Box Plot of Order Prices")
+    plt.grid()
+    plt.savefig(os.path.join(OUTPUT_FOLDER, "order_price_boxplot.png"))
+    plt.close()
+    logging.info("Box plot saved: data/order_price_boxplot.png")
+
+    # Bar Chart of Average Order Value per Order
+    avg_order_value_per_order = df.groupby("order_id")["price"].sum()
+    plt.figure(figsize=(10, 5))
+    avg_order_value_per_order.plot(kind="bar", color='green', alpha=0.6)
+    plt.xlabel("Order ID")
+    plt.ylabel("Total Order Value")
+    plt.title("Average Order Value per Order")
+    plt.xticks([], [])  # Remove order_id labels for clarity
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    plt.savefig(os.path.join(OUTPUT_FOLDER, "avg_order_value.png"))
+    plt.close()
+    logging.info("Bar chart saved: data/avg_order_value.png")
+
+    logging.info("All visualizations generated successfully.")
+
+# Define DAG default arguments
+default_args = {
+    'owner': 'airflow',
+    'start_date': days_ago(1),
+}
 
 # Define DAG
 dag = DAG(
-    'kpi_analysis_dag',
-    default_args={'start_date': days_ago(1)},
+    dag_id='kpi_analysis_dag',
+    default_args=default_args,
     schedule_interval=None,
     catchup=False
 )
 
-# Define tasks
+# Task to compute business KPIs
 compute_kpi_task = PythonOperator(
     task_id="compute_kpis",
     python_callable=compute_kpis,
     dag=dag
 )
 
-generate_visuals_task = PythonOperator(
-    task_id="generate_visualizations",
-    python_callable=generate_visualizations,
+# Task to generate KPI visualizations
+visualization_task = PythonOperator(
+    task_id="generate_visuals",
+    python_callable=generate_visuals,
     dag=dag
 )
 
-# Set dependencies
-compute_kpi_task >> generate_visuals_task
+# Define task dependencies
+compute_kpi_task >> visualization_task

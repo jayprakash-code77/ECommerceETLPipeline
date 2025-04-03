@@ -13,8 +13,7 @@ logging.basicConfig(level=logging.INFO)
 # Database connection details
 DB_URI = "postgresql://airflow:airflow@postgres:5432/ecommerce_db"
 
-# KaggleHub dataset directory
-DATASET_DIR = "/home/airflow/.cache/kagglehub/datasets/olistbr/brazilian-ecommerce/versions/2"
+# Mapping of table names to corresponding CSV file names
 CSV_FILES = {
     "customers": "olist_customers_dataset.csv",
     "orders": "olist_orders_dataset.csv",
@@ -22,33 +21,61 @@ CSV_FILES = {
 }
 
 def download_dataset():
-    """Downloads the dataset from KaggleHub."""
+    """Downloads the dataset from KaggleHub and logs details."""
     logging.info("Downloading dataset from KaggleHub...")
-    path = kagglehub.dataset_download("olistbr/brazilian-ecommerce")
-    
-    if os.path.exists(path):
-        logging.info(f"Dataset downloaded to: {path}")
+    dataset_path = kagglehub.dataset_download("olistbr/brazilian-ecommerce")
+
+    # Verify if the dataset was downloaded successfully
+    if os.path.exists(dataset_path):
+        logging.info(f"Dataset downloaded to: {dataset_path}")
         logging.info("Files in dataset directory:")
-        for root, dirs, files in os.walk(path):
+        for root, _, files in os.walk(dataset_path):
             for name in files:
-                logging.info(os.path.join(root, name))
+                logging.info(f"  - {os.path.join(root, name)}")
     else:
-        logging.error(f"Download path not found: {path}")
+        logging.error(f"Download path not found: {dataset_path}")
 
 def extract_and_load():
-    """Extracts data from KaggleHub cache and loads into PostgreSQL."""
+    """Extracts data from KaggleHub cache and loads it into PostgreSQL."""
     engine = create_engine(DB_URI)
+
+    # Ensure database connection
+    try:
+        with engine.connect() as conn:
+            logging.info("Successfully connected to PostgreSQL.")
+    except Exception as e:
+        logging.error(f"Database connection failed: {e}")
+        return
     
+    # Download dataset path
+    dataset_path = kagglehub.dataset_download("olistbr/brazilian-ecommerce")
+
     for table_name, file_name in CSV_FILES.items():
-        file_path = os.path.join(DATASET_DIR, file_name)
-        
+        file_path = os.path.join(dataset_path, file_name)
+
         try:
+            # Check if the file exists before loading
             if os.path.exists(file_path):
                 logging.info(f"Loading {file_name} into {table_name} table...")
                 
+                # Read CSV into DataFrame
                 df = pd.read_csv(file_path)
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+
+                # Log column names to verify correctness
+                logging.info(f"Columns in {file_name}: {list(df.columns)}")
+
+                # Ensure 'price' column exists for 'order_items' table
+                if table_name == "order_items" and "price" not in df.columns:
+                    logging.error(f"'price' column missing in {file_name}. Aborting load.")
+                    return
                 
+                # Convert 'price' column to float if present
+                if "price" in df.columns:
+                    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+
+                # Load data into PostgreSQL
+                df.to_sql(table_name, engine, if_exists="replace", index=False, chunksize=1000)
+
                 logging.info(f"Successfully loaded {file_name} into {table_name}.")
             else:
                 logging.error(f"File {file_path} not found!")
